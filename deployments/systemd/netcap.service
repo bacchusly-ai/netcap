@@ -1,0 +1,21 @@
+[Unit]
+Description=NetCap Traffic Capture Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/local/bin/tune-nic.sh eth1
+ExecStart=/usr/local/bin/netcap --config /etc/netcap/netcap.yaml
+Restart=on-failure
+RestartSec=5
+LimitMEMLOCK=infinity
+LimitNOFILE=1048576
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_BPF
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/netcap
+
+[Install]
+WantedBy=multi-user.target

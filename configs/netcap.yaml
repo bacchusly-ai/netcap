@@ -1,0 +1,93 @@
+# netcap — network capture agent configuration
+
+capture:
+  # Network interface to capture on.
+  interface: "eth0"
+  # Capture backend: "afpacket" or "pcap".
+  mode: "afpacket"
+  # Number of RX queues (AF_PACKET rings).
+  num_queues: 1
+  # Per-queue ring buffer size in bytes.
+  buffer_size: 4194304  # 4 MiB
+  # Maximum bytes to capture per packet.
+  snap_length: 9000
+  # Optional BPF filter expression (empty = capture all).
+  bpf_filter: ""
+  fanout:
+    enabled: false
+    group_id: 1
+    # Fanout type: "hash", "lb", "cpu", "rollover".
+    type: "hash"
+    # Number of fanout sockets.
+    size: 4
+
+decode:
+  # Number of parallel decode workers.
+  workers: 4
+  # Channel buffer between capture and decode stages.
+  channel_buffer: 4096
+
+reassembly:
+  # Maximum buffered pages per individual TCP connection.
+  max_buffered_pages_per_conn: 256
+  # Maximum total buffered pages across all connections.
+  max_buffered_pages_total: 65536
+  # Idle timeout before a connection is flushed.
+  connection_timeout: "2m"
+  # Absolute maximum lifetime of a tracked connection.
+  max_connection_age: "10m"
+  # Periodic flush interval for stale connections.
+  flush_interval: "30s"
+
+protocols:
+  # List of application-layer protocols to parse.
+  enabled:
+    - http
+    - dns
+    - tls
+  http:
+    # Max bytes of HTTP body to capture (0 = none).
+    max_body_capture: 65536
+    # Whether to capture HTTP headers.
+    capture_headers: true
+  tls:
+    # Extract JA3/JA3S fingerprints.
+    extract_ja3: true
+    # Extract certificate chains (expensive).
+    extract_certificates: false
+  db:
+    # Maximum SQL query length to capture.
+    max_query_length: 4096
+
+kafka:
+  brokers:
+    - "localhost:9092"
+  topic: "netcap-events"
+  batch_size: 100
+  batch_timeout: "500ms"
+  # Compression codec: "lz4", "snappy", "gzip", or "" for none.
+  compression: "lz4"
+  # Required acks: -1 = all, 0 = none, 1 = leader only.
+  required_acks: 1
+  # Number of parallel Kafka writer goroutines.
+  num_workers: 2
+  # Maximum size of a single Kafka message in bytes.
+  max_message_bytes: 1048576  # 1 MiB
+
+metrics:
+  enabled: true
+  # Address for Prometheus metrics endpoint.
+  listen: ":9090"
+  path: "/metrics"
+
+logging:
+  # Log level: "debug", "info", "warn", "error".
+  level: "info"
+  # Log format: "json" or "text".
+  format: "json"
+  # Log output: "stderr", "stdout", or a file path.
+  output: "stderr"
+
+runtime:
+  # GOMAXPROCS override (0 = Go default).
+  gomaxprocs: 0
