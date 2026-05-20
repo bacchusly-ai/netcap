@@ -27,7 +27,7 @@ Netcap 是一个高性能网络流量采集与协议解析代理，通过 AF_PAC
 
 ```bash
 # 从 release 页面下载对应平台的二进制
-wget https://github.com/netcap/netcap/releases/latest/download/netcap-linux-amd64 -O netcap
+wget https://github.com/netcap/netcap/releases/latest/download/netcap-amd64 -O netcap
 chmod +x netcap
 sudo mv netcap /usr/local/bin/
 ```
@@ -74,7 +74,7 @@ sudo netcap --config /etc/netcap/netcap.yaml
 
 > 注意：抓包需要 root 权限或 `CAP_NET_RAW`、`CAP_NET_ADMIN` 能力。推荐使用 capability 方式：
 > ```bash
-> sudo setcap cap_net_raw,cap_net_admin=eip /usr/local/bin/netcap
+> sudo setcap 'cap_net_raw,cap_net_admin,cap_bpf+ep' /usr/local/bin/netcap
 > ```
 
 ### 验证运行
@@ -207,7 +207,7 @@ netcap --config /etc/netcap/netcap.yaml
 
 | 协议 | 类型 | 默认端口 | 提取的关键字段 |
 |------|------|---------|---------------|
-| HTTP | TCP | 80, 8080, 8000, 8888, 3000 | method, url, host, status_code, headers, content_type, body_length |
+| HTTP | TCP | 80, 8080, 8000, 8888, 3000 | method, url, host, status_code, headers, content_type, body, body_length, body_truncated |
 | DNS | TCP/UDP | 53, 5353 | transaction_id, op_code, response_code, questions, answers |
 | TLS | TCP | 443, 8443, 993, 995, 465, 636 | version, server_name(SNI), ja3, alpn_protocols, handshake_type, certificate_chain |
 | MySQL | TCP | 3306, 33060 | system, operation(COM_QUERY等), statement, error_code, error_msg |
@@ -229,9 +229,12 @@ netcap --config /etc/netcap/netcap.yaml
 
 解析 HTTP/1.x 请求和响应。通过标准库 `net/http` 解析，提取：
 
-- **请求方向**：method、url（RequestURI）、host、headers（全部头字段）、content_type、body_length
-- **响应方向**：status_code、headers、content_type、body_length
+- **请求方向**：method、url（RequestURI）、host、headers（全部头字段）、content_type、body、body_length、body_truncated
+- **响应方向**：status_code、headers、content_type、body、body_length、body_truncated
 - **DPI 探测**：检测数据是否以 `GET `、`POST `、`PUT `、`DELETE `、`HEAD `、`PATCH `、`OPTIONS `、`HTTP/` 开头，置信度 90
+- **Body 抓取**：受 `protocols.http.max_body_capture` 控制，0 表示不抓 body，>0 表示按字节截断。超过上限时 `body_truncated=true`，`body_length` 仍反映原始 Content-Length，便于消费端判断是否被截断
+- **Keep-alive / Pipelining**：单次 reassembly buffer 内可能含多条请求或响应，parser 会逐条解析并发出多条事件
+- **请求-响应配对**：每条事件附带 `uid` 字段（详见第 5 节），下游消费者匹配相同 uid 即可配对一次往返
 
 #### DNS
 
@@ -343,7 +346,7 @@ netcap --config /etc/netcap/netcap.yaml
 ### Kafka 消息结构
 
 - **Topic**：配置项 `kafka.topic`，默认为 `netcap-events`
-- **Key**：8 字节 FNV-1a 哈希值，基于五元组（src_ip + dst_ip + src_port + dst_port）计算，保证同一流的消息落入同一分区
+- **Key**：8 字节 FNV-1a 哈希值，基于四元组（src_ip + dst_ip + src_port + dst_port）计算，保证同一流的消息落入同一分区
 - **Value**：JSON 编码的 `ProtocolEvent` 对象
 - **分区策略**：使用 `kafka-go` 的 `ReferenceHash` Balancer，按 Key 哈希选分区
 
@@ -352,6 +355,7 @@ netcap --config /etc/netcap/netcap.yaml
 | 字段 | JSON Key | 类型 | 说明 |
 |------|----------|------|------|
 | 时间戳 | `timestamp_ns` | int64 | Unix 纳秒时间戳 |
+| 关联ID | `uid` | string | 请求-响应配对标识，格式 `"<16位hex(conn_id)>-<seq>"`。同一对 HTTP 请求/响应共享同一 uid，下游消费者据此配对；未参与配对的协议（如 DNS、TLS 单条事件）此字段为空 |
 | 源IP | `src_ip` | []byte | 源 IP 地址（4字节 IPv4 / 16字节 IPv6） |
 | 目标IP | `dst_ip` | []byte | 目标 IP 地址 |
 | 源端口 | `src_port` | uint32 | 源端口号 |
@@ -375,7 +379,9 @@ netcap --config /etc/netcap/netcap.yaml
 | 状态码 | `status_code` | int32 | HTTP 响应状态码 |
 | 头字段 | `headers` | map[string]string | HTTP 头字段键值对 |
 | 内容类型 | `content_type` | string | Content-Type 头 |
-| 正文长度 | `body_length` | int64 | Content-Length |
+| 正文 | `body` | []byte | 报文 Body 内容，JSON 序列化为 Base64；长度受 `protocols.http.max_body_capture` 限制 |
+| 正文长度 | `body_length` | int64 | 原始声明的 Content-Length；chunked 传输或长度未知时可能为 -1。可能大于 `len(body)`（被截断时） |
+| 正文截断 | `body_truncated` | bool | true 表示原始 body 超过 `max_body_capture`，`body` 字段只是前 N 字节 |
 
 ### DNSDetail 子结构
 
@@ -396,7 +402,7 @@ netcap --config /etc/netcap/netcap.yaml
 | 字段 | JSON Key | 类型 | 说明 |
 |------|----------|------|------|
 | 版本 | `version` | string | TLS 版本（如 "TLS 1.2"） |
-| 密码套件 | `cipher_suite` | string | JA3 哈希值 |
+| 密码套件 | `cipher_suite` | string | 协商的密码套件名称或 JA3 指纹哈希（具体取决于握手阶段） |
 | 服务器名 | `server_name` | string | SNI 域名 |
 | 握手类型 | `handshake_type` | int32 | 握手消息类型（1=ClientHello） |
 | 证书链 | `certificate_chain` | []string | 证书链信息（需开启配置） |
@@ -425,6 +431,7 @@ netcap --config /etc/netcap/netcap.yaml
 ```json
 {
   "timestamp_ns": 1712150400000000000,
+  "uid": "a3f1c9e72b8d4501-0",
   "src_ip": "kgqLAQ==",
   "dst_ip": "rBIAAQ==",
   "src_port": 52431,
@@ -432,19 +439,49 @@ netcap --config /etc/netcap/netcap.yaml
   "protocol": "http",
   "direction": 1,
   "http_detail": {
-    "method": "GET",
-    "url": "/api/v1/users?page=1&size=20",
+    "method": "POST",
+    "url": "/api/v1/login",
     "host": "api.example.com",
     "headers": {
       "Accept": "application/json",
-      "Authorization": "Bearer eyJhbGciOi...",
+      "Content-Type": "application/json",
       "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/120.0"
     },
-    "content_type": "",
-    "body_length": 0
+    "content_type": "application/json",
+    "body": "eyJ1c2VybmFtZSI6ImFsaWNlIiwicGFzc3dvcmQiOiIqKioqIn0=",
+    "body_length": 50
   }
 }
 ```
+
+> 说明：`body` 是 Base64 编码的 `{"username":"alice","password":"****"}`；`body_length` 与解码后字节数一致，表示未被截断。
+
+#### HTTP 响应示例（与上面请求配对）
+
+```json
+{
+  "timestamp_ns": 1712150400123456000,
+  "uid": "a3f1c9e72b8d4501-0",
+  "src_ip": "rBIAAQ==",
+  "dst_ip": "kgqLAQ==",
+  "src_port": 80,
+  "dst_port": 52431,
+  "protocol": "http",
+  "direction": 2,
+  "http_detail": {
+    "status_code": 200,
+    "headers": {
+      "Content-Type": "application/json",
+      "Content-Length": "42"
+    },
+    "content_type": "application/json",
+    "body": "eyJ0b2tlbiI6ImV5SmhiR2NpT2lKSVV6STFOaUo5In0=",
+    "body_length": 42
+  }
+}
+```
+
+> 配对规则：消费者匹配相同 `uid` 即可把请求和响应关联起来。本例中两条事件的 uid 都是 `"a3f1c9e72b8d4501-0"`，表示这是该 TCP 连接（conn_id=a3f1c9e72b8d4501）上的第 0 对请求/响应。Keep-alive 后续的第 1 对、第 2 对会依次得到 uid `…-1`、`…-2`。
 
 #### DNS 查询示例
 
@@ -768,6 +805,7 @@ import (
 // ProtocolEvent 与 netcap 输出的 JSON 结构对应
 type ProtocolEvent struct {
     TimestampNs int64             `json:"timestamp_ns"`
+    UID         string            `json:"uid,omitempty"`
     SrcIP       []byte            `json:"src_ip"`
     DstIP       []byte            `json:"dst_ip"`
     SrcPort     uint32            `json:"src_port"`
@@ -782,11 +820,15 @@ type ProtocolEvent struct {
 }
 
 type HTTPDetail struct {
-    Method     string            `json:"method,omitempty"`
-    URL        string            `json:"url,omitempty"`
-    Host       string            `json:"host,omitempty"`
-    StatusCode int32             `json:"status_code,omitempty"`
-    Headers    map[string]string `json:"headers,omitempty"`
+    Method        string            `json:"method,omitempty"`
+    URL           string            `json:"url,omitempty"`
+    Host          string            `json:"host,omitempty"`
+    StatusCode    int32             `json:"status_code,omitempty"`
+    Headers       map[string]string `json:"headers,omitempty"`
+    ContentType   string            `json:"content_type,omitempty"`
+    Body          []byte            `json:"body,omitempty"`
+    BodyLength    int64             `json:"body_length,omitempty"`
+    BodyTruncated bool              `json:"body_truncated,omitempty"`
 }
 
 type DNSDetail struct {
@@ -844,11 +886,30 @@ func main() {
     }
 }
 
+// pending 暂存待配对的请求，等响应到来时合并输出。
+// 生产环境应配上 LRU/TTL 防止孤儿请求长期占用内存。
+var pending = map[string]*ProtocolEvent{}
+
 func handleHTTP(ev *ProtocolEvent) {
-    if ev.HTTPDetail != nil {
-        fmt.Printf("HTTP %s %s (host=%s, status=%d)\n",
-            ev.HTTPDetail.Method, ev.HTTPDetail.URL,
-            ev.HTTPDetail.Host, ev.HTTPDetail.StatusCode)
+    if ev.HTTPDetail == nil || ev.UID == "" {
+        return
+    }
+    switch ev.Direction {
+    case 1: // request
+        pending[ev.UID] = ev
+    case 2: // response
+        req, ok := pending[ev.UID]
+        if !ok {
+            // 孤儿响应：对应的请求可能在本消费者启动前发出，或丢失
+            fmt.Printf("HTTP ?  -> %d (uid=%s)\n", ev.HTTPDetail.StatusCode, ev.UID)
+            return
+        }
+        delete(pending, ev.UID)
+        fmt.Printf("HTTP %s %s host=%s status=%d req_body=%dB resp_body=%dB rtt=%dms\n",
+            req.HTTPDetail.Method, req.HTTPDetail.URL, req.HTTPDetail.Host,
+            ev.HTTPDetail.StatusCode,
+            len(req.HTTPDetail.Body), len(ev.HTTPDetail.Body),
+            (ev.TimestampNs-req.TimestampNs)/1_000_000)
     }
 }
 
@@ -870,6 +931,8 @@ consumer = KafkaConsumer(
     value_deserializer=lambda m: json.loads(m.decode('utf-8'))
 )
 
+pending_http = {}  # 暂存待配对的请求；生产环境应使用带 TTL 的存储
+
 for msg in consumer:
     event = msg.value
     protocol = event.get('protocol', 'unknown')
@@ -879,8 +942,20 @@ for msg in consumer:
     # 按协议分流
     if protocol == 'http' and event.get('http_detail'):
         detail = event['http_detail']
-        print(f"HTTP {detail.get('method')} {detail.get('url')} "
-              f"host={detail.get('host')} status={detail.get('status_code')}")
+        uid = event.get('uid', '')
+        direction = event.get('direction', 0)
+        # 简易请求-响应配对（生产环境建议带 TTL 的字典或 Redis）
+        if direction == 1:
+            pending_http[uid] = event
+        elif direction == 2:
+            req = pending_http.pop(uid, None)
+            if req:
+                rtt_ms = (event['timestamp_ns'] - req['timestamp_ns']) / 1_000_000
+                print(f"HTTP {req['http_detail'].get('method')} "
+                      f"{req['http_detail'].get('url')} -> {detail.get('status_code')} "
+                      f"rtt={rtt_ms:.1f}ms uid={uid}")
+            else:
+                print(f"HTTP orphan response status={detail.get('status_code')} uid={uid}")
 
     elif protocol == 'dns' and event.get('dns_detail'):
         detail = event['dns_detail']
@@ -911,13 +986,28 @@ for msg in consumer:
 - DB 事件 -> 慢查询告警、SQL 注入检测
 - 邮件协议（SMTP/IMAP/POP3）-> 邮件审计
 
-**按 flow key 聚合会话**
+**按 uid 配对请求-响应（推荐）**
 
-Kafka 消息的 Key 是基于五元组的哈希值。利用此特性：
+HTTP 事件在协议解析阶段会被打上 `uid` 标签，格式 `"<conn_id_hex>-<seq>"`：
 
-1. 同一 TCP 连接的请求和响应会落在同一分区，消费者可在本地按 Key 聚合请求-响应对
-2. 使用 `timestamp_ns` 字段进行时序排序
-3. 结合 `direction` 字段（1=请求, 2=响应）配对会话
+- 同一对请求/响应共享同一 `uid`
+- 同一 TCP 连接 keep-alive 上的第 N 次往返 seq=N（从 0 起算）
+- 客户端请求和服务端响应方向各自维护独立计数器，靠 HTTP/1.x keep-alive 的 FIFO 顺序对齐
+- TCP 连接关闭时 netcap 内部状态会被清理，5 元组复用不会污染 uid
+
+消费侧建议：
+
+1. 用 `uid` 做主键暂存请求事件，响应到达时弹出配对
+2. 给暂存表设 TTL（建议 10-60 秒）防止孤儿请求堆积
+3. `timestamp_ns` 差值即往返耗时（RTT）
+
+**按 flow key 聚合分区**
+
+Kafka 消息 Key 是 4 元组 FNV-1a 哈希，保证同一会话写入同一分区：
+
+1. 同一 TCP 连接的请求和响应必然落在同一分区，无需跨分区 join
+2. 单分区内消息按生产顺序到达，可用 `timestamp_ns` 做时序排序
+3. 配对仍以 `uid` 为准（分区只是保证局部性，不直接给出配对关系）
 
 ---
 
@@ -1019,24 +1109,29 @@ sudo sysctl -w net.core.netdev_max_backlog=10000
 
 ```ini
 [Unit]
-Description=Netcap Network Traffic Capture Agent
+Description=NetCap Traffic Capture Agent
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
+ExecStartPre=/usr/local/bin/tune-nic.sh eth1
 ExecStart=/usr/local/bin/netcap --config /etc/netcap/netcap.yaml
 Restart=on-failure
 RestartSec=5
-LimitNOFILE=65536
 LimitMEMLOCK=infinity
-AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
-StandardOutput=journal
-StandardError=journal
+LimitNOFILE=1048576
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_BPF
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/netcap
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+> 注意：`ExecStartPre` 中的网卡名称（`eth1`）需要与实际镜像口一致。
 
 ---
 

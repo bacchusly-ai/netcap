@@ -73,7 +73,9 @@ cd netcap
 make build
 ```
 
-编译产物位于 `bin/netcap`。
+编译产物位于 `bin/netcap`（当前平台架构）。
+
+> 注意：`make build` 生成的二进制文件名为 `bin/netcap`，而 `make build-all` 生成的二进制文件名带有架构后缀（如 `bin/netcap-amd64`）。部署时请根据实际构建方式选择对应的文件。
 
 **多架构交叉编译：**
 
@@ -123,8 +125,13 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 **步骤 1：复制文件**
 
 ```bash
-# 复制二进制文件
+# 复制二进制文件（根据目标架构选择对应文件）
+# 单架构编译（make build）:
 sudo cp bin/netcap /usr/local/bin/netcap
+# 交叉编译（make build-all）示例:
+# sudo cp bin/netcap-amd64 /usr/local/bin/netcap    # x86_64
+# sudo cp bin/netcap-arm64 /usr/local/bin/netcap    # ARM64
+# sudo cp bin/netcap-loong64 /usr/local/bin/netcap  # LoongArch
 sudo chmod +x /usr/local/bin/netcap
 
 # 复制网卡调优脚本
@@ -440,35 +447,46 @@ kafka-topics.sh --bootstrap-server kafka1:9092 \
 
 当前版本使用 **JSON** 格式序列化协议事件（`JSONSerializer`），后续计划支持 **Protobuf** 格式以降低序列化开销和消息体积。
 
-消息结构示例（HTTP 事件）：
+消息结构示例（HTTP 请求事件）：
 
 ```json
 {
-  "timestamp": "2026-04-03T10:30:00.123456Z",
-  "src_ip": "192.168.1.100",
+  "timestamp_ns": 1712150400123456000,
+  "uid": "a3f1c9e72b8d4501-0",
+  "src_ip": "wKgBZA==",
+  "dst_ip": "CgAAAQ==",
   "src_port": 54321,
-  "dst_ip": "10.0.0.1",
   "dst_port": 80,
   "protocol": "http",
-  "direction": "request",
-  "http": {
-    "method": "GET",
-    "uri": "/api/v1/users",
+  "direction": 1,
+  "http_detail": {
+    "method": "POST",
+    "url": "/api/v1/login",
     "host": "example.com",
-    "headers": {"User-Agent": "curl/7.68.0"},
-    "status_code": 200,
-    "body_truncated": false
+    "headers": {"User-Agent": "curl/7.68.0", "Content-Type": "application/json"},
+    "content_type": "application/json",
+    "body": "eyJ1c2VybmFtZSI6ImFsaWNlIn0=",
+    "body_length": 22
   }
 }
 ```
 
+> 说明：
+> - `timestamp_ns` 为 Unix 纳秒时间戳
+> - `src_ip`/`dst_ip` 为 `[]byte` 类型，JSON 序列化后为 Base64 编码
+> - `direction` 为整型（0=未知, 1=请求, 2=响应）
+> - `uid` 是请求-响应配对标识；同一对 HTTP 请求/响应共享同一 uid（具体语义详见用户手册）
+> - `body` 是 Base64 编码的 HTTP body，长度受 `protocols.http.max_body_capture` 限制，超长时 `body_truncated=true`
+
 ### 7.3 分区策略
 
-NetCap 采用 **Flow 五元组 Hash** 分区策略，确保同一会话（src_ip, dst_ip, src_port, dst_port, protocol）的所有事件写入同一分区，保证：
+NetCap 采用 **Flow 四元组 Hash** 分区策略，确保同一会话（src_ip, dst_ip, src_port, dst_port）的所有事件写入同一分区，保证：
 
 - 同一 TCP 连接的请求和响应在同一分区内有序
 - 下游消费者可按分区独立处理完整的会话流
 - 负载在各分区间均匀分布
+
+**请求-响应配对：**消费端不应依赖分区内的相对顺序去配对，而是通过事件的 `uid` 字段精确匹配。同一对 HTTP 请求/响应的 `uid` 一致，跨分区也能配对（虽然实际上同一连接的两端总会落在同一分区）。详细用法见用户手册「消费端对接」章节。
 
 ---
 
