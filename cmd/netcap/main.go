@@ -184,7 +184,7 @@ func buildRegistry(cfg *config.Config) *protocol.Registry {
 
 	// Register all parsers. Order does not matter — the registry uses
 	// port-based lookup and DPI probing.
-	reg.Register(&protohttp.Parser{})
+	reg.Register(protohttp.NewParser(cfg.Protocols.HTTP.MaxBodyCapture))
 	reg.Register(&protodns.Parser{})
 	reg.Register(&prototls.Parser{})
 	reg.Register(protomysql.NewParser(maxQ))

@@ -28,6 +28,7 @@ func (f *streamFactory) New(netFlow, tcpFlow gopacket.Flow, _ *layers.TCP, _ rea
 	s := &biStream{
 		net:       netFlow,
 		transport: tcpFlow,
+		connID:    netFlow.FastHash() ^ tcpFlow.FastHash(),
 		output:    f.output,
 		logger:    f.logger,
 	}
@@ -38,6 +39,7 @@ func (f *streamFactory) New(netFlow, tcpFlow gopacket.Flow, _ *layers.TCP, _ rea
 type biStream struct {
 	net       gopacket.Flow
 	transport gopacket.Flow
+	connID    uint64
 	output    chan StreamData
 
 	clientBuf bytes.Buffer
@@ -104,8 +106,37 @@ func (s *biStream) ReassemblyComplete(ac reassembly.AssemblerContext) bool {
 		s.flushDirectionLocked(false, ac)
 	}
 
+	// Emit a close marker so downstream parsers can release per-connection
+	// state. The marker travels on the same channel as data so it cannot
+	// overtake the final data chunk for this connection.
+	s.emitCloseLocked()
+
 	// Return false = remove from pool (we are done).
 	return false
+}
+
+// emitCloseLocked enqueues a connection-close marker on the output channel.
+// Caller must hold s.mu. Non-blocking: a dropped marker is acceptable because
+// downstream parsers also enforce a TTL on per-connection state.
+func (s *biStream) emitCloseLocked() {
+	srcPort, dstPort := extractPorts(s.transport)
+	msg := StreamData{
+		Net:       s.net,
+		Transport: s.transport,
+		Closed:    true,
+		ConnMeta: ConnMeta{
+			SrcIP:   s.net.Src().String(),
+			DstIP:   s.net.Dst().String(),
+			SrcPort: srcPort,
+			DstPort: dstPort,
+			ConnID:  s.connID,
+		},
+	}
+	select {
+	case s.output <- msg:
+	default:
+		s.logger.Warn("close marker dropped (channel full)", "conn_id", s.connID)
+	}
 }
 
 // flushDirectionLocked sends buffered data for one direction to the output
@@ -137,6 +168,7 @@ func (s *biStream) flushDirectionLocked(isClient bool, ac reassembly.AssemblerCo
 			DstIP:   s.net.Dst().String(),
 			SrcPort: srcPort,
 			DstPort: dstPort,
+			ConnID:  s.connID,
 		},
 	}
 

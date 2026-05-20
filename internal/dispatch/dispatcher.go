@@ -105,6 +105,10 @@ func (d *Dispatcher) udpLoop(ctx context.Context) {
 
 // handleTCP resolves a parser for the reassembled TCP stream data and emits events.
 func (d *Dispatcher) handleTCP(ctx context.Context, sd reassembly.StreamData) {
+	if sd.Closed {
+		d.registry.NotifyClose(sd.ConnMeta.ConnID)
+		return
+	}
 	if len(sd.Data) == 0 {
 		return
 	}
@@ -119,6 +123,7 @@ func (d *Dispatcher) handleTCP(ctx context.Context, sd reassembly.StreamData) {
 		DstIP:   net.ParseIP(sd.ConnMeta.DstIP),
 		SrcPort: sd.ConnMeta.SrcPort,
 		DstPort: sd.ConnMeta.DstPort,
+		ConnID:  sd.ConnMeta.ConnID,
 	}
 
 	events, err := p.Parse(sd.Data, meta, sd.IsClient)

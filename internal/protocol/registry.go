@@ -54,6 +54,17 @@ func (r *Registry) Resolve(srcPort, dstPort uint16, sample []byte, isFromClient 
 	return r.bestProbe(r.all, sample, isFromClient)
 }
 
+// NotifyClose fans out a connection-close event to every registered parser
+// that implements ConnLifecycleHandler. Parsers without per-connection state
+// silently ignore the call.
+func (r *Registry) NotifyClose(connID uint64) {
+	for _, p := range r.all {
+		if h, ok := p.(ConnLifecycleHandler); ok {
+			h.OnConnClose(connID)
+		}
+	}
+}
+
 // bestProbe returns the parser with the highest Probe score, or nil if every
 // parser returned 0.
 func (r *Registry) bestProbe(parsers []Parser, sample []byte, isFromClient bool) Parser {

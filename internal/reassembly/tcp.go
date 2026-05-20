@@ -17,7 +17,12 @@ import (
 )
 
 // StreamData represents a chunk of reassembled bytes from one direction
-// of a TCP connection.
+// of a TCP connection, or a connection-close marker when Closed is true.
+//
+// When Closed is true: Data is empty, IsClient is irrelevant, and ConnMeta
+// (in particular ConnID) identifies the connection that just ended. The
+// marker is emitted after any pending data for the connection has already
+// been flushed downstream, so parsers can safely drop per-connection state.
 type StreamData struct {
 	Net       gopacket.Flow
 	Transport gopacket.Flow
@@ -25,14 +30,20 @@ type StreamData struct {
 	IsClient  bool // true for the initiating (client -> server) direction
 	Timestamp time.Time
 	ConnMeta  ConnMeta
+	Closed    bool
 }
 
-// ConnMeta carries the original four-tuple for convenience.
+// ConnMeta carries the original four-tuple plus a stable connection
+// identifier for the bidirectional TCP stream. ConnID is computed via
+// gopacket's direction-agnostic FastHash so both directions of the same
+// connection share the same value — protocol parsers rely on this to
+// correlate requests with their responses.
 type ConnMeta struct {
 	SrcIP   string
 	DstIP   string
 	SrcPort uint16
 	DstPort uint16
+	ConnID  uint64
 }
 
 // ReassemblyConfig controls the reassembly engine.

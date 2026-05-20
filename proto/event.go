@@ -17,8 +17,15 @@ const (
 )
 
 // ProtocolEvent is the top-level envelope for every captured protocol event.
+//
+// UID correlates a request event with its response event. For protocols that
+// expose a native message identifier (HTTP/2 stream id, DNS transaction id),
+// the UID is derived from that. For HTTP/1.x, the UID is synthesized as
+// "hex(conn_id)-N", where N is a per-connection, per-direction FIFO counter:
+// the Nth request from the client pairs with the Nth response from the server.
 type ProtocolEvent struct {
 	TimestampNs int64             `json:"timestamp_ns"`
+	UID         string            `json:"uid,omitempty"`
 	SrcIP       []byte            `json:"src_ip"`
 	DstIP       []byte            `json:"dst_ip"`
 	SrcPort     uint32            `json:"src_port"`
@@ -48,14 +55,22 @@ func NewEvent(protocol string, dir Direction) *ProtocolEvent {
 // ---------------------------------------------------------------------------
 
 // HTTPDetail carries parsed HTTP request/response fields.
+//
+// Body holds up to N bytes of the message body (configurable via
+// protocols.http.max_body_capture). BodyTruncated is true when the original
+// body was longer than the captured slice. BodyLength reflects the declared
+// Content-Length when available; it may exceed len(Body) under truncation,
+// or be -1 when the length is unknown (chunked transfer without trailers).
 type HTTPDetail struct {
-	Method      string            `json:"method,omitempty"`
-	URL         string            `json:"url,omitempty"`
-	Host        string            `json:"host,omitempty"`
-	StatusCode  int32             `json:"status_code,omitempty"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	ContentType string            `json:"content_type,omitempty"`
-	BodyLength  int64             `json:"body_length,omitempty"`
+	Method        string            `json:"method,omitempty"`
+	URL           string            `json:"url,omitempty"`
+	Host          string            `json:"host,omitempty"`
+	StatusCode    int32             `json:"status_code,omitempty"`
+	Headers       map[string]string `json:"headers,omitempty"`
+	ContentType   string            `json:"content_type,omitempty"`
+	BodyLength    int64             `json:"body_length,omitempty"`
+	Body          []byte            `json:"body,omitempty"`
+	BodyTruncated bool              `json:"body_truncated,omitempty"`
 }
 
 // DNSDetail carries parsed DNS query/response fields.
